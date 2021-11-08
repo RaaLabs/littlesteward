@@ -158,20 +158,24 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 	}
 
 	// Check if we are able to contact node.
+	log.Printf("%v,%v: trying to connect\n", n.ip, n.name)
 	_, err := net.DialTimeout("tcp", n.ip+":22", time.Second*5)
 	if err != nil {
 		return fmt.Errorf("error: unable to reach node: %v", err)
 	}
+	log.Printf("%v,%v: got ack for connection\n", n.ip, n.name)
 
 	// TODO: do the actual ssh command here.
 	sshTimeout := 30
 
 	// Copy the script file using scp to the node.
+	log.Printf("%v,%v: trying to copy script\n", n.ip, n.name)
 	scpCmd := fmt.Sprintf("scp -rp -o ConnectTimeout=%v -o StrictHostKeyChecking=no -i %v %v %v@%v:", sshTimeout, s.idRSAFile, s.scriptFile, s.sshUser, n.ip)
 	out, err := exec.Command("/bin/bash", "-c", scpCmd).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error: failed to execute scp command: %v", err)
 	}
+	log.Printf("%v,%v: script copied\n", n.ip, n.name)
 
 	// Write to the status.log file.
 	{
@@ -191,6 +195,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 
 	// -----------------------
 
+	log.Printf("%v,%v: trying to execute script\n", n.ip, n.name)
 	sshScript := fmt.Sprintf("sudo bash -c 'export NODENAME=%v; /home/%v/%v'", n.name, s.sshUser, s.scriptFile)
 	sshCmd := fmt.Sprintf("ssh -o ConnectTimeout=%v -n -i %v %v@%v \"%v\"", sshTimeout, s.idRSAFile, s.sshUser, n.ip, sshScript)
 	// fmt.Printf(" * sshCmd : %v\n", sshCmd)
@@ -219,6 +224,8 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 	if err != nil {
 		return fmt.Errorf("error: ssh cmd failed: %v: %v", err, string(out))
 	}
+
+	log.Printf("%v,%v: script executed\n", n.ip, n.name)
 
 	// Write to the status.log file.
 	{
