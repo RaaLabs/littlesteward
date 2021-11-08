@@ -19,8 +19,9 @@ var wg sync.WaitGroup
 
 // server holds general variables for the service.
 type server struct {
-	scriptFile string
-	hostsFile  string
+	scriptFile        string
+	hostsFile         string
+	hostsRemoveNodeCh chan nodeDone
 
 	statusFile string
 	statusCh   chan nodeStatus
@@ -44,8 +45,9 @@ func newServer(scriptFile string, sshUser string, idRSAFile string) (*server, er
 	}
 
 	s := server{
-		scriptFile: scriptFile,
-		hostsFile:  "hosts.txt",
+		scriptFile:        scriptFile,
+		hostsFile:         "hosts.txt",
+		hostsRemoveNodeCh: make(chan nodeDone),
 
 		statusFile: "status.log",
 		statusCh:   make(chan nodeStatus),
@@ -91,6 +93,18 @@ func (s *server) run() error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wgFile sync.WaitGroup
+
+	// Start the handling of the removal og nodes from hosts file.
+	wgFile.Add(1)
+	go func() {
+		err := s.hostsHandler(ctx)
+		if err != nil {
+			log.Printf("%v\n", err)
+			cancel()
+			os.Exit(1)
+		}
+		wgFile.Done()
+	}()
 
 	// Start the handling of the done.log file
 	wgFile.Add(1)
@@ -266,10 +280,11 @@ func (s *server) doneHandler(ctx context.Context) error {
 				return fmt.Errorf("error: writing to done file: %v", err)
 			}
 
-			err = s.removeNodeFromFile(nd.node)
-			if err != nil {
-				return err
-			}
+			// Remove the node from the hosts file.
+			ndHostsRemove := nd
+			ndHostsRemove.done = make(chan struct{})
+			s.hostsRemoveNodeCh <- ndHostsRemove
+			<-ndHostsRemove.done
 
 		case <-ctx.Done():
 			fmt.Println(" * exiting handleDone")
@@ -327,53 +342,62 @@ func (s *server) getNodesFromFile() ([]node, error) {
 }
 
 // Remove the given node argument from hosts.txt file.
-func (s *server) removeNodeFromFile(n node) error {
-	fh, err := os.Open(s.hostsFile)
-	if err != nil {
-		return fmt.Errorf("error: unable to open hosts file: %v", err)
-	}
+func (s *server) hostsHandler(ctx context.Context) error {
+	for {
+		select {
+		case n := <-s.hostsRemoveNodeCh:
+			fh, err := os.Open(s.hostsFile)
+			if err != nil {
+				return fmt.Errorf("error: unable to open hosts file: %v", err)
+			}
 
-	scanner := bufio.NewScanner(fh)
-	nodes := []node{}
+			scanner := bufio.NewScanner(fh)
+			nodes := []node{}
 
-	// Read one line at a time from the hostfile, and append
-	// all the nodes, except the one given as argument.
-	for scanner.Scan() {
-		sp := strings.Split(scanner.Text(), ",")
-		tmpN := node{
-			ip:   sp[0],
-			name: sp[1],
+			// Read one line at a time from the hostfile, and append
+			// all the nodes, except the one given as argument.
+			for scanner.Scan() {
+				sp := strings.Split(scanner.Text(), ",")
+				tmpN := node{
+					ip:   sp[0],
+					name: sp[1],
+				}
+
+				if tmpN.ip != n.node.ip {
+					nodes = append(nodes, tmpN)
+				}
+			}
+			err = fh.Close()
+			if err != nil {
+				return fmt.Errorf("error: unable to close hosts file: %v", err)
+			}
+
+			// Write the new node slice, where the one to remove is removed
+			// back to the hosts file.
+			fh, err = os.OpenFile(s.hostsFile, os.O_TRUNC|os.O_RDWR, 0755)
+			if err != nil {
+				return fmt.Errorf("error: unable to open hosts file for writing new: %v", err)
+			}
+
+			for _, v := range nodes {
+				_, err := fh.Write([]byte(v.ip + "," + v.name + "\n"))
+				if err != nil {
+					return fmt.Errorf("error: unable to write node to hosts file: %v", err)
+				}
+			}
+
+			err = fh.Close()
+			if err != nil {
+				return fmt.Errorf("error: unable to close hosts file: %v", err)
+			}
+
+			n.done <- struct{}{}
+
+		case <-ctx.Done():
+			fmt.Println(" * exiting removeNodeHostsFile")
+			return nil
 		}
-
-		if tmpN.ip != n.ip {
-			nodes = append(nodes, tmpN)
-		}
 	}
-	err = fh.Close()
-	if err != nil {
-		return fmt.Errorf("error: unable to close hosts file: %v", err)
-	}
-
-	// Write the new node slice, where the one to remove is removed
-	// back to the hosts file.
-	fh, err = os.OpenFile(s.hostsFile, os.O_TRUNC|os.O_RDWR, 0755)
-	if err != nil {
-		return fmt.Errorf("error: unable to open hosts file for writing new: %v", err)
-	}
-
-	for _, v := range nodes {
-		_, err := fh.Write([]byte(v.ip + "," + v.name + "\n"))
-		if err != nil {
-			return fmt.Errorf("error: unable to write node to hosts file: %v", err)
-		}
-	}
-
-	err = fh.Close()
-	if err != nil {
-		return fmt.Errorf("error: unable to close hosts file: %v", err)
-	}
-
-	return nil
 }
 
 func main() {
