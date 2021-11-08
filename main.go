@@ -1,5 +1,22 @@
 package main
 
+// Basic idea of operation:
+// - Will load all the ip adresses and hosts from the hosts.txt file.
+// - Will try to copy the script file to the host.
+// - Will try to execute the script file on the host.
+//
+// If successful an entry will be made in the done.log file, followed by the
+// output of the script, and the node is removed from the hosts.txt file.
+//
+// If unsuccessful an entry will be made in the failed.log file, followed by the
+// output of the script, and the node is removed from the hosts.txt file.
+//
+// If unable to initiate connection, an error will be printed to the console,
+// and the node name will be kept in the hosts.txt file so it will be retried on
+// the next run.
+//
+// The program will run until the hosts.txt file is empty.
+
 import (
 	"bufio"
 	"context"
@@ -26,11 +43,12 @@ type server struct {
 	// Channel to signal to remove a node entry from the hosts file.
 	hostsRemoveCh chan nodeEvent
 
-	// The overall status log file.
+	// The failed script execution log file.
 	failedFile   string
 	failedFileCh chan nodeEvent
-	doneFile     string
-	doneFileCh   chan nodeEvent
+	// The done log file
+	doneFile   string
+	doneFileCh chan nodeEvent
 
 	sshUser   string
 	idRSAFile string
@@ -107,7 +125,7 @@ func (s *server) run() error {
 	// Start the handling of the done.log file
 	wgFile.Add(1)
 	go func() {
-		err := s.doneHandler(ctx)
+		err := s.doneFileHandler(ctx)
 		if err != nil {
 			log.Printf("%v\n", err)
 			cancel()
@@ -116,10 +134,10 @@ func (s *server) run() error {
 		wgFile.Done()
 	}()
 
-	// Start the handling of the status.log file
+	// Start the handling of the failed.log file
 	wgFile.Add(1)
 	go func() {
-		err := s.statusHandler(ctx)
+		err := s.failedFileHandler(ctx)
 		if err != nil {
 			log.Printf("%v\n", err)
 			cancel()
@@ -134,16 +152,28 @@ func (s *server) run() error {
 		go func(n node) {
 			err := s.handleNode(ctx, n)
 			if err != nil {
-				// Write to the status.log file.
-				done := make(chan struct{}, 1)
+				{
+					done := make(chan struct{}, 1)
 
-				s.failedFileCh <- nodeEvent{
-					node: n,
-					text: err.Error(),
-					done: done,
+					s.failedFileCh <- nodeEvent{
+						node: n,
+						text: err.Error(),
+						done: done,
+					}
+					// log.Printf("%v\n", err)
+					<-done
+
+					// Remove the node from the hosts file.
+					ne := nodeEvent{
+						node: n,
+						done: make(chan struct{}),
+					}
+
+					s.hostsRemoveCh <- ne
+					<-ne.done
 				}
-				log.Printf("%v\n", err)
-				<-done
+
+				log.Printf("%v,%v,%v\n", n.ip, n.name, err)
 			}
 			wg.Done()
 		}(n)
@@ -187,20 +217,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 	if err != nil {
 		return fmt.Errorf("error: failed to execute scp command: %v", err)
 	}
-	log.Printf("%v,%v: script copied\n", n.ip, n.name)
-
-	// Write to the status.log file.
-	{
-		done := make(chan struct{}, 1)
-
-		s.failedFileCh <- nodeEvent{
-			node: n,
-			text: "successfully copied the script to the node : " + string(out),
-			done: done,
-		}
-		// log.Printf("%v\n", err)
-		<-done
-	}
+	log.Printf("%v,%v: successfully copied the script to the node: %v\n", n.ip, n.name, string(out))
 
 	// ssh to the node, and exexute the script
 	// ssh -o ConnectTimeout=$sshTimeout -n -i $idRsaFile "$sshUser"@"$ipAddress" "sudo bash -c 'export NODENAME=$name; $scpDestinationFolder/$scriptName'" 2>&1
@@ -237,20 +254,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 		return fmt.Errorf("error: ssh cmd failed: %v: %v", err, string(out))
 	}
 
-	log.Printf("%v,%v: script executed\n", n.ip, n.name)
-
-	// Write to the status.log file.
-	{
-		done := make(chan struct{}, 1)
-
-		s.failedFileCh <- nodeEvent{
-			node: n,
-			text: "info: script ok: " + string(out),
-			done: done,
-		}
-		// log.Printf("%v\n", err)
-		<-done
-	}
+	log.Printf("%v,%v,%v: script executed ok\n", n.ip, n.name, string(out))
 
 	// -----------------------
 
@@ -264,7 +268,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 
 // handleDone will handle the done.log file and also initiate a removal
 // of the the node from the hosts file when the node is done.
-func (s *server) doneHandler(ctx context.Context) error {
+func (s *server) doneFileHandler(ctx context.Context) error {
 	fhDone, err := os.OpenFile(s.doneFile, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
 		return fmt.Errorf("error: opening done file: %v", err)
@@ -293,11 +297,11 @@ func (s *server) doneHandler(ctx context.Context) error {
 	}
 }
 
-// Will handle the writing to the status.log file.
-func (s *server) statusHandler(ctx context.Context) error {
+// Will handle the writing to the failed.log file.
+func (s *server) failedFileHandler(ctx context.Context) error {
 	fh, err := os.OpenFile(s.failedFile, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
-		return fmt.Errorf("error: opening status file: %v", err)
+		return fmt.Errorf("error: opening the failed file: %v", err)
 	}
 	defer fh.Close()
 
@@ -311,7 +315,7 @@ func (s *server) statusHandler(ctx context.Context) error {
 			}
 
 		case <-ctx.Done():
-			log.Println(" * exiting statusHandler")
+			log.Println(" * exiting failedFile Handler")
 			return nil
 		}
 	}

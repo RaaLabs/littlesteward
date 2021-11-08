@@ -11,10 +11,28 @@
 # file which should be in the format:
 # 10.10.10.1,myhostnamehere
 
+## The ${NODENAME} env variable is taken from the nodename part in the hosts.txt file,
+## and is exported directly in the ssh command when executed, and can be used within
+## the script in the following way.
+##
+# cat >/etc/hostname <<EOF
+# ${NODENAME}
+# EOF
+
+## Only the last error is read by the from ssh in the main program, so we can add more
+## things to do like for example this
+##
+# progName="myservice"
+# if ! systemctl stop $progName.service >/dev/null 2>&1; then
+#     echo "*" error: systemctl stop $progName.service
+#     exit 1
+# fi
+
 errorMessage=$(
     # Redirect stderr to stdout for all command with the closure.
     {
         swupd info
+        # More commands can be added below within the parentheses.
     } 2>&1
 )
 
