@@ -152,28 +152,36 @@ func (s *server) run() error {
 		go func(n node) {
 			err := s.handleNode(ctx, n)
 			if err != nil {
-				{
-					done := make(chan struct{}, 1)
+				switch err.(type) {
 
-					s.failedFileCh <- nodeEvent{
-						node: n,
-						text: err.Error(),
-						done: done,
+				// If it is a connError we do not wan't to remove it from the hosts.txt file.
+				case *connError:
+					log.Printf("%v,%v,%v\n", n.ip, n.name, err)
+
+				// Not connError, remove it from the hosts.txt file.
+				default:
+					{
+						done := make(chan struct{}, 1)
+
+						s.failedFileCh <- nodeEvent{
+							node: n,
+							text: err.Error(),
+							done: done,
+						}
+						<-done
+
+						// Remove the node from the hosts file.
+						ne := nodeEvent{
+							node: n,
+							done: make(chan struct{}),
+						}
+
+						s.hostsRemoveCh <- ne
+						<-ne.done
 					}
-					// log.Printf("%v\n", err)
-					<-done
 
-					// Remove the node from the hosts file.
-					ne := nodeEvent{
-						node: n,
-						done: make(chan struct{}),
-					}
-
-					s.hostsRemoveCh <- ne
-					<-ne.done
+					log.Printf("%v,%v,%v\n", n.ip, n.name, err)
 				}
-
-				log.Printf("%v,%v,%v\n", n.ip, n.name, err)
 			}
 			wg.Done()
 		}(n)
@@ -191,6 +199,21 @@ func (s *server) run() error {
 	return nil
 }
 
+type connError struct {
+	text string
+}
+
+func (e *connError) Error() string {
+	return fmt.Sprintf("connection error: %v", e.text)
+}
+
+func newConnError(errText string) *connError {
+	err := connError{}
+	err.text = fmt.Sprintf("error: unable to reach node: %v", errText)
+
+	return &err
+}
+
 // handleHost handles each individual host entry read from the hosts file.
 func (s *server) handleNode(ctx context.Context, n node) error {
 	doneNode := make(chan struct{}, 1)
@@ -201,10 +224,14 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 
 	// Check if we are able to contact node.
 	log.Printf("%v,%v: trying to connect\n", n.ip, n.name)
+
 	_, err := net.DialTimeout("tcp", n.ip+":22", time.Second*5)
 	if err != nil {
-		return fmt.Errorf("error: unable to reach node: %v", err)
+		err := newConnError(err.Error())
+
+		return err
 	}
+
 	log.Printf("%v,%v: got ack for connection\n", n.ip, n.name)
 
 	sshTimeout := 30
@@ -237,7 +264,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 	go func() {
 		buf := bufio.NewScanner(pipe)
 		for buf.Scan() {
-			log.Printf("%v\n", buf.Text())
+			//log.Printf("%v\n", buf.Text())
 			outSlice = append(outSlice, buf.Text())
 
 		}
@@ -432,7 +459,7 @@ func main() {
 		}
 
 		// putting in a little timer so we don't spam the nodes with reconnects.
-		time.Sleep(time.Second * 5)
+		time.Sleep(time.Second * 2)
 	}
 
 }
