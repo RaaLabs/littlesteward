@@ -19,14 +19,18 @@ var wg sync.WaitGroup
 
 // server holds general variables for the service.
 type server struct {
-	scriptFile    string
-	hostsFile     string
+	// The script to execute on the host.
+	scriptFile string
+	// The file who contains all the hosts to run the script on.
+	hostsFile string
+	// Channel to signal to remove a node entry from the hosts file.
 	hostsRemoveCh chan nodeEvent
 
-	statusFile   string
-	statusCh     chan nodeEvent
-	nodeDoneFile string
-	nodeDoneCh   chan nodeEvent
+	// The overall status log file.
+	failedFile   string
+	failedFileCh chan nodeEvent
+	doneFile     string
+	doneFileCh   chan nodeEvent
 
 	sshUser   string
 	idRSAFile string
@@ -49,10 +53,10 @@ func newServer(scriptFile string, sshUser string, idRSAFile string) (*server, er
 		hostsFile:     "hosts.txt",
 		hostsRemoveCh: make(chan nodeEvent),
 
-		statusFile:   "status.log",
-		statusCh:     make(chan nodeEvent),
-		nodeDoneFile: "done.log",
-		nodeDoneCh:   make(chan nodeEvent),
+		failedFile:   "failed.log",
+		failedFileCh: make(chan nodeEvent),
+		doneFile:     "done.log",
+		doneFileCh:   make(chan nodeEvent),
 
 		sshUser:   sshUser,
 		idRSAFile: idRSAFile,
@@ -133,7 +137,7 @@ func (s *server) run() error {
 				// Write to the status.log file.
 				done := make(chan struct{}, 1)
 
-				s.statusCh <- nodeEvent{
+				s.failedFileCh <- nodeEvent{
 					node: n,
 					text: err.Error(),
 					done: done,
@@ -189,7 +193,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 	{
 		done := make(chan struct{}, 1)
 
-		s.statusCh <- nodeEvent{
+		s.failedFileCh <- nodeEvent{
 			node: n,
 			text: "successfully copied the script to the node : " + string(out),
 			done: done,
@@ -239,7 +243,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 	{
 		done := make(chan struct{}, 1)
 
-		s.statusCh <- nodeEvent{
+		s.failedFileCh <- nodeEvent{
 			node: n,
 			text: "info: script ok: " + string(out),
 			done: done,
@@ -252,7 +256,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 
 	// Signal that we are done with the current node.
 	nd.text = string(out)
-	s.nodeDoneCh <- nd
+	s.doneFileCh <- nd
 	<-doneNode
 
 	return nil
@@ -261,7 +265,7 @@ func (s *server) handleNode(ctx context.Context, n node) error {
 // handleDone will handle the done.log file and also initiate a removal
 // of the the node from the hosts file when the node is done.
 func (s *server) doneHandler(ctx context.Context) error {
-	fhDone, err := os.OpenFile(s.nodeDoneFile, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
+	fhDone, err := os.OpenFile(s.doneFile, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
 		return fmt.Errorf("error: opening done file: %v", err)
 	}
@@ -269,7 +273,7 @@ func (s *server) doneHandler(ctx context.Context) error {
 
 	for {
 		select {
-		case nd := <-s.nodeDoneCh:
+		case nd := <-s.doneFileCh:
 			_, err := fhDone.Write([]byte(nd.node.ip + "," + nd.node.name + "," + nd.text + "\n"))
 			nd.done <- struct{}{}
 			if err != nil {
@@ -291,7 +295,7 @@ func (s *server) doneHandler(ctx context.Context) error {
 
 // Will handle the writing to the status.log file.
 func (s *server) statusHandler(ctx context.Context) error {
-	fh, err := os.OpenFile(s.statusFile, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
+	fh, err := os.OpenFile(s.failedFile, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
 		return fmt.Errorf("error: opening status file: %v", err)
 	}
@@ -299,7 +303,7 @@ func (s *server) statusHandler(ctx context.Context) error {
 
 	for {
 		select {
-		case st := <-s.statusCh:
+		case st := <-s.failedFileCh:
 			_, err := fh.Write([]byte(st.node.ip + "," + st.node.name + "," + st.text + "\n"))
 			st.done <- struct{}{}
 			if err != nil {
